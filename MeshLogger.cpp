@@ -216,7 +216,7 @@ int main(int argc, char** argv)
   }
 
   const std::string mesh_file     = clArgs.follow("", "-mesh");
-  const std::string struct_file    = clArgs.follow("", "-struct");
+  const std::string struct_file   = clArgs.follow("", "-struct");
   const std::string cam_mod_file  = clArgs.follow("", "-cmod");
   const std::string source_dir    = clArgs.follow(".", "-sdir");
   const std::string pose_file     = clArgs.follow("", "-poses");
@@ -295,7 +295,7 @@ int main(int argc, char** argv)
     gl_mesh.SetPerceptable(true);
 //    gl_mesh.SetScale(2.0);
 //    gl_mesh.SetPose(0, 0, 7, -M_PI / 2, 0, 0); // Monterey
-    gl_mesh.SetPose(-53, -171, 1, -M_PI/2, 0, (-55*M_PI)/180.0); // Alabama House
+//    gl_mesh.SetPose(-53, -171, 1, -M_PI/2, 0, (-55*M_PI)/180.0); // Alabama House
     gl_graph.AddChild(&gl_mesh);
     std::cout << "MeshLogger: Mesh '" << mesh_file << "' loaded." << std::endl;
   } catch(std::exception) {
@@ -303,18 +303,20 @@ int main(int argc, char** argv)
     exit(EXIT_FAILURE);
   }
 
-  // Set up mesh.
-  SceneGraph::GLMesh gl_struct;
-  try {
-    gl_struct.Init(struct_file);
-    gl_struct.SetPerceptable(true);
-    gl_struct.SetScale(4.0);
-    gl_struct.SetPose(0, 0, 1, -M_PI / 2, 0, 0);
-    gl_graph.AddChild(&gl_struct);
-    std::cout << "MeshLogger: Mesh '" << struct_file << "' loaded." << std::endl;
-  } catch(std::exception) {
-    std::cerr << "error: Cannot load mesh. Check file exists." << std::endl;
-    exit(EXIT_FAILURE);
+  // Set up additional structure.
+  if (struct_file.empty() ==  false) {
+    SceneGraph::GLMesh gl_struct;
+    try {
+      gl_struct.Init(struct_file);
+      gl_struct.SetPerceptable(true);
+      gl_struct.SetScale(4.0);
+      gl_struct.SetPose(0, 0, 1, -M_PI / 2, 0, 0);
+      gl_graph.AddChild(&gl_struct);
+      std::cout << "MeshLogger: Mesh '" << struct_file << "' loaded." << std::endl;
+    } catch(std::exception) {
+      std::cerr << "error: Cannot load structure file. Check file exists." << std::endl;
+      exit(EXIT_FAILURE);
+    }
   }
 
   // Set up axis for camera pose.
