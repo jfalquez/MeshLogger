@@ -9,7 +9,7 @@
 #include <SceneGraph/SimCam.h>
 #include <calibu/Calibu.h>
 #include <HAL/Utils/GetPot>
-#include <PbMsgs/Logger.h>
+#include <HAL/Messages/Logger.h>
 
 ///////////////////////////////////////////////////////////////////////////
 const char USAGE[] =
@@ -68,32 +68,33 @@ bool LoadPoseFile(
 
   file.open(file_name.c_str());
 
-  Eigen::Matrix4d T;
-  Eigen::Matrix4d Tt = SceneGraph::GLCart2T(0, 0, 0, 0, 0, -M_PI/2.0);
-
   if (file.is_open()) {
     std::cout << "MeshLogger: File opened..." << std::endl;
 
+    // Read as T matrix.
     /*
-        pFile >> T(0,0) >> T(0,1) >> T(0,2) >> T(0,3) >>
+        Eigen::Matrix4d T;
+        file >> T(0,0) >> T(0,1) >> T(0,2) >> T(0,3) >>
                  T(1,0) >> T(1,1) >> T(1,2) >> T(1,3) >>
                  T(2,0) >> T(2,1) >> T(2,2) >> T(2,3) >>
                  T(3,0) >> T(3,1) >> T(3,2) >> T(3,3);
-        Pose = SceneGraph::GLT2Cart(T);
-        */
+        pose = SceneGraph::GLT2Cart(Tt*T);
+    */
     file >> pose(0) >> pose(1) >> pose(2) >> pose(3) >> pose(4) >> pose(5);
 
     while (!file.eof()) {
+      vec_poses.push_back(Sophus::SE3d(SceneGraph::GLCart2T(pose)));
+
+      file >> pose(0) >> pose(1)  >> pose(2) >> pose(3) >> pose(4) >> pose(5);
+
+      // Read as T matrix.
       /*
-          vPoses.push_back( Sophus::SE3d( Tt.inverse()*T*Tt ) );
-          pFile >> T(0,0) >> T(0,1) >> T(0,2) >> T(0,3) >>
+          file >> T(0,0) >> T(0,1) >> T(0,2) >> T(0,3) >>
                    T(1,0) >> T(1,1) >> T(1,2) >> T(1,3) >>
                    T(2,0) >> T(2,1) >> T(2,2) >> T(2,3) >>
                    T(3,0) >> T(3,1) >> T(3,2) >> T(3,3);
-          Pose = SceneGraph::GLT2Cart(T);
-         */
-      vec_poses.push_back(Sophus::SE3d(SceneGraph::GLCart2T(pose)));
-      file >> pose(0) >> pose(1)  >> pose(2) >> pose(3) >> pose(4) >> pose(5);
+          pose = SceneGraph::GLT2Cart(Tt*T);
+      */
     }
   } else {
     std::cerr << "MeshLogger: Error opening pose file!" << std::endl;
@@ -208,20 +209,20 @@ int main(int argc, char** argv)
     exit(EXIT_FAILURE);
   }
 
-  GetPot clArgs(argc, argv);
+  GetPot cl_args(argc, argv);
 
-  if (clArgs.search(3, "--help", "-help", "-h")) {
+  if (cl_args.search(3, "--help", "-help", "-h")) {
     std::cout << USAGE << std::endl;
     exit(EXIT_FAILURE);
   }
 
-  const std::string mesh_file     = clArgs.follow("", "-mesh");
-  const std::string struct_file   = clArgs.follow("", "-struct");
-  const std::string cam_mod_file  = clArgs.follow("", "-cmod");
-  const std::string source_dir    = clArgs.follow(".", "-sdir");
-  const std::string pose_file     = clArgs.follow("", "-poses");
-  const bool        capture_depth = clArgs.search("-depth");
-  const bool        oversample    = clArgs.search("-os");
+  const std::string mesh_file     = cl_args.follow("", "-mesh");
+  const std::string struct_file   = cl_args.follow("", "-struct");
+  const std::string cam_mod_file  = cl_args.follow("", "-cmod");
+  const std::string source_dir    = cl_args.follow(".", "-sdir");
+  const std::string pose_file     = cl_args.follow("", "-poses");
+  const bool        capture_depth = cl_args.search("-depth");
+  const bool        oversample    = cl_args.search("-os");
 
   if (mesh_file.empty() || cam_mod_file.empty()) {
     std::cout << "error: Input files missing!" << std::endl;
@@ -231,10 +232,11 @@ int main(int argc, char** argv)
 
 
   ///-------------------- Load Camera Rig
-  calibu::CameraRig rig = calibu::ReadXmlRig(source_dir + "/" + cam_mod_file);
+  std::shared_ptr<calibu::Rig<double>> rig =
+          calibu::ReadXmlRig(source_dir + "/" + cam_mod_file);
 
   // TODO(jmf): Allow a different number of cameras (other than 2).
-  const size_t num_cams = rig.cameras.size();
+  const size_t num_cams = rig->NumCams();
 
   if (num_cams != 2) {
     std::cerr << "error: Two cameras are required to run this program." << std::endl;
@@ -246,26 +248,32 @@ int main(int argc, char** argv)
   // calibu reading the RDF from the file and setting things up appropriately.
   rig = calibu::ToCoordinateConvention(rig, calibu::RdfRobotics);
 
-  calibu::CameraModel left_cam_mod = rig.cameras[0].camera;
-  calibu::CameraModel right_cam_mod = rig.cameras[1].camera;
+  std::shared_ptr<calibu::CameraInterface<double>> left_cam_mod =
+      rig->cameras_[0];
+  std::shared_ptr<calibu::CameraInterface<double>> right_cam_mod =
+      rig->cameras_[1];
 
   if (oversample) {
-    left_cam_mod.Scale(4);
-    right_cam_mod.Scale(4);
+    left_cam_mod->Scale(4);
+    right_cam_mod->Scale(4);
   }
 
-  // camera poses w.r.t. the world
-  Sophus::SE3d T_rig_cam1 = rig.cameras[0].T_wc;
-  Sophus::SE3d T_rig_cam2 = rig.cameras[1].T_wc;
+  // camera poses w.r.t. the rig
+  Sophus::SE3d T_rig_cam1 = rig->cameras_[0]->Pose();
+  Sophus::SE3d T_rig_cam2 = rig->cameras_[1]->Pose();
 
   // cameras are assumed to be identical in width and height as well
   // as having the same intrinsics
   // TODO(jmf): Allow different camera intrinsics?
-  const size_t img_width = left_cam_mod.Width();
-  const size_t img_height = left_cam_mod.Height();
+  size_t img_width = left_cam_mod->Width();
+  size_t img_height = left_cam_mod->Height();
+  if (oversample) {
+    img_width *= 4;
+    img_height *= 4;
+  }
 
-  Eigen::Matrix3d K_left = left_cam_mod.K();
-  Eigen::Matrix3d K_right = right_cam_mod.K();
+  Eigen::Matrix3d K_left = left_cam_mod->K();
+  Eigen::Matrix3d K_right = right_cam_mod->K();
 
 
 
@@ -293,9 +301,6 @@ int main(int argc, char** argv)
   try {
     gl_mesh.Init(mesh_file);
     gl_mesh.SetPerceptable(true);
-//    gl_mesh.SetScale(2.0);
-//    gl_mesh.SetPose(0, 0, 7, -M_PI / 2, 0, 0); // Monterey
-//    gl_mesh.SetPose(-53, -171, 1, -M_PI/2, 0, (-55*M_PI)/180.0); // Alabama House
     gl_graph.AddChild(&gl_mesh);
     std::cout << "MeshLogger: Mesh '" << mesh_file << "' loaded." << std::endl;
   } catch(std::exception) {
@@ -341,61 +346,61 @@ int main(int argc, char** argv)
 
 
   ///-------------------- Initialize cameras
-  SceneGraph::GLSimCam glCamLeft;
-  SceneGraph::GLSimCam glCamRight;
+  SceneGraph::GLSimCam gl_cam_left;
+  SceneGraph::GLSimCam gl_cam_right;
 
   if (capture_depth) {
-    glCamLeft.Init(&gl_graph, (T_w_rig * T_rig_cam1).matrix(), K_left, img_width,
+    gl_cam_left.Init(&gl_graph, (T_w_rig * T_rig_cam1).matrix(), K_left, img_width,
                    img_height, SceneGraph::eSimCamLuminance|SceneGraph::eSimCamDepth);
   } else {
-    glCamLeft.Init(&gl_graph, (T_w_rig * T_rig_cam1).matrix(), K_left, img_width,
+    gl_cam_left.Init(&gl_graph, (T_w_rig * T_rig_cam1).matrix(), K_left, img_width,
                    img_height, SceneGraph::eSimCamLuminance);
   }
 
-  glCamRight.Init(&gl_graph, (T_w_rig * T_rig_cam2).matrix(), K_right, img_width,
+  gl_cam_right.Init(&gl_graph, (T_w_rig * T_rig_cam2).matrix(), K_right, img_width,
                   img_height, SceneGraph::eSimCamLuminance);
 
   // Define Camera Render Object (for view / scene browsing)
-  pangolin::OpenGlRenderState glState(pangolin::ProjectionMatrix(640, 480, 420, 420, 320, 240, 0.1, 100000),
-                                      pangolin::ModelViewLookAt(-6, 0, -30, 1, 0, 0, pangolin::AxisNegZ));
+  pangolin::OpenGlRenderState gl_state(pangolin::ProjectionMatrix(640, 480, 420, 420, 320, 240, 0.1, 100000),
+                                       pangolin::ModelViewLookAt(-6, 0, -30, 1, 0, 0, pangolin::AxisNegZ));
 
   // pangolinlin abstracts the OpenGL viewport as a View.
   // Here we get a reference to the default 'base' view.
-  pangolin::View& glBaseView = pangolin::DisplayBase();
+  pangolin::View& gl_base_view = pangolin::DisplayBase();
 
   // We define a new view which will reside within the container.
-  pangolin::View glView3D;
+  pangolin::View gl_view3D;
 
   // We set the views location on screen and add a handler which will
   // let user input update the model_view matrix (stacks3d) and feed through
   // to our scenegraph.
-  glView3D.SetBounds(0.0, 1.0, 0.0, 3.0/4.0, 640.0f/480.0f);
-  glView3D.SetHandler(new SceneGraph::HandlerSceneGraph(gl_graph, glState, pangolin::AxisNone));
-  glView3D.SetDrawFunction(SceneGraph::ActivateDrawFunctor(gl_graph, glState));
+  gl_view3D.SetBounds(0.0, 1.0, 0.0, 3.0/4.0, 640.0f/480.0f);
+  gl_view3D.SetHandler(new SceneGraph::HandlerSceneGraph(gl_graph, gl_state, pangolin::AxisNone));
+  gl_view3D.SetDrawFunction(SceneGraph::ActivateDrawFunctor(gl_graph, gl_state));
 
   // display images
-  SceneGraph::ImageView glLeftImg(true, true);
-  glLeftImg.SetBounds(2.0/3.0, 1.0, 3.0/4.0, 1.0, static_cast<double>(img_width/img_height));
+  SceneGraph::ImageView gl_left_img(true, true);
+  gl_left_img.SetBounds(2.0/3.0, 1.0, 3.0/4.0, 1.0, static_cast<double>(img_width/img_height));
 
-  SceneGraph::ImageView glRightImg(true, true);
-  glRightImg.SetBounds(1.0/3.0, 2.0/3.0, 3.0/4.0, 1.0, static_cast<double>(img_width/img_height));
+  SceneGraph::ImageView gl_right_img(true, true);
+  gl_right_img.SetBounds(1.0/3.0, 2.0/3.0, 3.0/4.0, 1.0, static_cast<double>(img_width/img_height));
 
-  SceneGraph::ImageView glDepthImg(true, false);
+  SceneGraph::ImageView gl_depth_img(true, false);
   if (capture_depth) {
-    glDepthImg.SetBounds(0.0, 1.0/3.0, 3.0/4.0, 1.0, static_cast<double>(img_width/img_height));
+    gl_depth_img.SetBounds(0.0, 1.0/3.0, 3.0/4.0, 1.0, static_cast<double>(img_width/img_height));
   }
 
   // Add our views as children to the base container.
-  glBaseView.AddDisplay(glView3D);
-  glBaseView.AddDisplay(glLeftImg);
-  glBaseView.AddDisplay(glRightImg);
+  gl_base_view.AddDisplay(gl_view3D);
+  gl_base_view.AddDisplay(gl_left_img);
+  gl_base_view.AddDisplay(gl_right_img);
 
   if (capture_depth) {
-    glBaseView.AddDisplay(glDepthImg);
+    gl_base_view.AddDisplay(gl_depth_img);
   }
 
   ///-------------------- Program control
-  bool capture = false;
+  bool capture = have_pose_file ? true : false;
   bool pause   = false;
 
   // register key callbacks
@@ -418,14 +423,15 @@ int main(int argc, char** argv)
 
 
   // Buffer for our images and depth map.
-  unsigned char*  pBuffImg   = (unsigned char*)malloc(img_width * img_height);
-  unsigned char*  pBuffImgT  = (unsigned char*)malloc(img_width * img_height);
-  float*          pBuffDepth = (float*)malloc(img_width * img_height * 4);
-  float*          pBuffDepthT = (float*)malloc(img_width * img_height * 4);
+  unsigned char*  ptr_img_buff   = (unsigned char*)malloc(img_width * img_height);
+  unsigned char*  ptr_img_buff_T  = (unsigned char*)malloc(img_width * img_height);
+  float*          ptr_depth_buff = (float*)malloc(img_width * img_height * 4);
+  float*          ptr_depth_buff_T = (float*)malloc(img_width * img_height * 4);
 
   // Aux variables for logging.
-  pb::Msg         pbMsg;
-  pb::CameraMsg*  pCamMsg = nullptr;
+  hal::Msg         msg;
+  hal::CameraMsg*  ptr_cam_msg = nullptr;
+  hal::Logger&     logger = hal::Logger::GetInstance();
 
   // Default hooks for exiting (Esc) and fullscreen (tab).
   for (unsigned frame_number = 0; !pangolin::ShouldQuit(); frame_number++) {
@@ -437,78 +443,78 @@ int main(int argc, char** argv)
     Sophus::SE3d Tvel(SceneGraph::GLCart2T(rig_velocity));
     T_w_rig = T_w_rig * Tvel;
 
-    glCamLeft.SetPoseRobot((T_w_rig * T_rig_cam1).matrix());
-    glCamRight.SetPoseRobot((T_w_rig * T_rig_cam2).matrix());
+    gl_cam_left.SetPoseRobot((T_w_rig * T_rig_cam1).matrix());
+    gl_cam_right.SetPoseRobot((T_w_rig * T_rig_cam2).matrix());
 
     // "Take picture".
-    glCamLeft.RenderToTexture();    // will render to texture, then copy texture to CPU memory
-    glCamRight.RenderToTexture();    // will render to texture, then copy texture to CPU memory
+    gl_cam_left.RenderToTexture();    // will render to texture, then copy texture to CPU memory
+    gl_cam_right.RenderToTexture();    // will render to texture, then copy texture to CPU memory
 
     // Follow camera.
-    glState.Follow((T_w_rig * T_rig_cam1).matrix());
+    gl_state.Follow((T_w_rig * T_rig_cam1).matrix());
 
     // Render cameras.
-    glView3D.Activate(glState);
-    glCamLeft.DrawCamera();
-    glCamRight.DrawCamera();
+    gl_view3D.Activate(gl_state);
+    gl_cam_left.DrawCamera();
+    gl_cam_right.DrawCamera();
 
     // If capturing, prepare protobuf message.
     if (capture && !pause) {
-      pbMsg.Clear();
-      pbMsg.set_timestamp(frame_number);
-      pCamMsg = pbMsg.mutable_camera();
+      msg.Clear();
+      msg.set_timestamp(frame_number);
+      ptr_cam_msg = msg.mutable_camera();
     }
 
     // Show left image.
-    if (glCamLeft.CaptureGrey(pBuffImg)) {
+    if (gl_cam_left.CaptureGrey(ptr_img_buff)) {
 //      WarpImage<unsigned char>(pBuffImgT, pBuffImg, img_width, img_height, K_left, 0.92);
-      glLeftImg.SetImage(pBuffImg, img_width, img_height, GL_INTENSITY, GL_LUMINANCE, GL_UNSIGNED_BYTE);
+      gl_left_img.SetImage(ptr_img_buff, img_width, img_height, GL_INTENSITY, GL_LUMINANCE, GL_UNSIGNED_BYTE);
       if (capture && !pause) {
         if (oversample) {
           cv::Mat downsampled;
-          cv::Mat upsampled(cv::Size(img_width, img_height), CV_8U, pBuffImg);
+          cv::Mat upsampled(cv::Size(img_width, img_height), CV_8U, ptr_img_buff);
           cv::pyrDown(upsampled, downsampled, cv::Size(img_width/2, img_height/2));
           cv::pyrDown(downsampled, downsampled, cv::Size(img_width/4, img_height/4));
-          pb::ImageMsg* pImg = pCamMsg->add_image();
-          pImg->set_width(img_width/4);
-          pImg->set_height(img_height/4);
-          pImg->set_data(downsampled.data, img_width * img_height / 16);
-          pImg->set_type(pb::PB_UNSIGNED_BYTE);
-          pImg->set_format(pb::PB_LUMINANCE);
+          hal::ImageMsg* img_ptr = ptr_cam_msg->add_image();
+          img_ptr->set_width(img_width/4);
+          img_ptr->set_height(img_height/4);
+          img_ptr->set_data(downsampled.data, img_width * img_height / 16);
+          img_ptr->set_type(hal::PB_UNSIGNED_BYTE);
+          img_ptr->set_format(hal::PB_LUMINANCE);
         } else {
-          pb::ImageMsg* pImg = pCamMsg->add_image();
-          pImg->set_width(img_width);
-          pImg->set_height(img_height);
-          pImg->set_data(pBuffImg, img_width * img_height);
-          pImg->set_type(pb::PB_UNSIGNED_BYTE);
-          pImg->set_format(pb::PB_LUMINANCE);
+          hal::ImageMsg* img_ptr = ptr_cam_msg->add_image();
+          img_ptr->set_width(img_width);
+          img_ptr->set_height(img_height);
+          img_ptr->set_data(ptr_img_buff, img_width * img_height);
+          img_ptr->set_type(hal::PB_UNSIGNED_BYTE);
+          img_ptr->set_format(hal::PB_LUMINANCE);
         }
       }
     }
 
     // Show right image.
 #if 1
-    if (glCamRight.CaptureGrey(pBuffImg)) {
-      glRightImg.SetImage(pBuffImg, img_width, img_height, GL_INTENSITY, GL_LUMINANCE, GL_UNSIGNED_BYTE);
+    if (gl_cam_right.CaptureGrey(ptr_img_buff)) {
+      gl_right_img.SetImage(ptr_img_buff, img_width, img_height, GL_INTENSITY, GL_LUMINANCE, GL_UNSIGNED_BYTE);
       if (capture && !pause) {
         if (oversample) {
           cv::Mat downsampled;
-          cv::Mat upsampled(cv::Size(img_width, img_height), CV_8U, pBuffImg);
+          cv::Mat upsampled(cv::Size(img_width, img_height), CV_8U, ptr_img_buff);
           cv::pyrDown(upsampled, downsampled, cv::Size(img_width/2, img_height/2));
           cv::pyrDown(downsampled, downsampled, cv::Size(img_width/4, img_height/4));
-          pb::ImageMsg* pImg = pCamMsg->add_image();
-          pImg->set_width(img_width/4);
-          pImg->set_height(img_height/4);
-          pImg->set_data(downsampled.data, img_width*img_height/16);
-          pImg->set_type(pb::PB_UNSIGNED_BYTE);
-          pImg->set_format(pb::PB_LUMINANCE);
+          hal::ImageMsg* img_ptr = ptr_cam_msg->add_image();
+          img_ptr->set_width(img_width/4);
+          img_ptr->set_height(img_height/4);
+          img_ptr->set_data(downsampled.data, img_width*img_height/16);
+          img_ptr->set_type(hal::PB_UNSIGNED_BYTE);
+          img_ptr->set_format(hal::PB_LUMINANCE);
         } else {
-          pb::ImageMsg* pImg = pCamMsg->add_image();
-          pImg->set_width(img_width);
-          pImg->set_height(img_height);
-          pImg->set_data(pBuffImg, img_width * img_height);
-          pImg->set_type(pb::PB_UNSIGNED_BYTE);
-          pImg->set_format(pb::PB_LUMINANCE);
+          hal::ImageMsg* img_ptr = ptr_cam_msg->add_image();
+          img_ptr->set_width(img_width);
+          img_ptr->set_height(img_height);
+          img_ptr->set_data(ptr_img_buff, img_width * img_height);
+          img_ptr->set_type(hal::PB_UNSIGNED_BYTE);
+          img_ptr->set_format(hal::PB_LUMINANCE);
         }
       }
     }
@@ -516,37 +522,37 @@ int main(int argc, char** argv)
 
     // Show depth.
     if (capture_depth) {
-      if (glCamLeft.CaptureDepth(pBuffDepth)) {
+      if (gl_cam_left.CaptureDepth(ptr_depth_buff)) {
 //        WarpImage<float>(pBuffDepthT, pBuffDepth, img_width, img_height, K_left, 0.92);
         if (capture && !pause) {
           if (oversample) {
             cv::Mat downsampled;
-            cv::Mat upsampled(cv::Size(img_width, img_height), CV_32F, pBuffDepth);
+            cv::Mat upsampled(cv::Size(img_width, img_height), CV_32F, ptr_depth_buff);
             cv::pyrDown(upsampled, downsampled, cv::Size(img_width/2, img_height/2));
             cv::pyrDown(downsampled, downsampled, cv::Size(img_width/4, img_height/4));
-            pb::ImageMsg* pImg = pCamMsg->add_image();
-            pImg->set_width(img_width/4);
-            pImg->set_height(img_height/4);
-            pImg->set_data(downsampled.data, img_width*img_height*4/16);
-            pImg->set_type(pb::PB_FLOAT);
-            pImg->set_format(pb::PB_LUMINANCE);
+            hal::ImageMsg* img_ptr = ptr_cam_msg->add_image();
+            img_ptr->set_width(img_width/4);
+            img_ptr->set_height(img_height/4);
+            img_ptr->set_data(downsampled.data, img_width*img_height*4/16);
+            img_ptr->set_type(hal::PB_FLOAT);
+            img_ptr->set_format(hal::PB_LUMINANCE);
           } else {
-            pb::ImageMsg* pImg = pCamMsg->add_image();
-            pImg->set_width(img_width);
-            pImg->set_height(img_height);
-            pImg->set_data(pBuffDepth, img_width*img_height*4);
-            pImg->set_type(pb::PB_FLOAT);
-            pImg->set_format(pb::PB_LUMINANCE);
+            hal::ImageMsg* img_ptr = ptr_cam_msg->add_image();
+            img_ptr->set_width(img_width);
+            img_ptr->set_height(img_height);
+            img_ptr->set_data(ptr_depth_buff, img_width*img_height*4);
+            img_ptr->set_type(hal::PB_FLOAT);
+            img_ptr->set_format(hal::PB_LUMINANCE);
           }
         }
-        NormalizeDepth(pBuffDepth, img_width * img_height);
-        glDepthImg.SetImage(pBuffDepth, img_width, img_height, GL_INTENSITY, GL_LUMINANCE, GL_FLOAT);
+        NormalizeDepth(ptr_depth_buff, img_width * img_height);
+        gl_depth_img.SetImage(ptr_depth_buff, img_width, img_height, GL_INTENSITY, GL_LUMINANCE, GL_FLOAT);
       }
     }
 
     // Log message.
     if (capture && !pause) {
-      pb::Logger::GetInstance().LogMessage(pbMsg);
+      logger.LogMessage(msg);
 #if 0
       // This is to change endianness for Capri.
       cv::Mat grey(img_height, img_width, CV_8UC1, pBuffImgT);
@@ -579,7 +585,7 @@ int main(int argc, char** argv)
       pose_idx++;
       if (pose_idx >= vec_poses.size()) {
         std::cout << "MeshLogger: Finished rendering input file." << std::endl;
-        exit(EXIT_SUCCESS);
+        break;
       }
       T_w_rig = vec_poses[pose_idx];
       gl_axis.SetPose(T_w_rig.matrix());
@@ -591,6 +597,12 @@ int main(int argc, char** argv)
     // Pause for 1/60th of a second.
     usleep(1E6 / 60);
   }
+
+  // Wait for logger to finish copying to disk.
+  std::cout << "MeshLogger: Waiting for logger to flush queue... ";
+  fflush(stdout);
+  logger.StopLogging();
+  std::cout << "Done!" << std::endl;
 
   return 0;
 }
